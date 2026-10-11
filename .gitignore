@@ -9,3 +9,6 @@ test.sh
 */roles/geerlingguy.*
 */provisioning/roles/geerlingguy.*
 */collections/ansible_collections/community/*
+
+
+inventory*
