@@ -1,5 +1,5 @@
 ---
-- name: Prepare Kubernetes nodes
+- name: Prepare cloud nodes and container runtime
   hosts: k8s
   become: true
   gather_facts: true
@@ -7,24 +7,22 @@
     - ../vars/cloud.yml
 
   pre_tasks:
-    - name: Require explicit approval before changing shared servers
+    - name: Require approval before changing shared servers
       ansible.builtin.assert:
         that:
           - confirm_shared_server_changes | default(false) | bool
         fail_msg: >-
-          Review the planned changes with your group leader.
-          Rerun with -e confirm_shared_server_changes=true only after approval.
+          Review changes with the group leader before running this playbook
+          against shared servers.
 
-    - name: Verify the expected operating system and node IP
+    - name: Verify cloud host configuration
       ansible.builtin.assert:
         that:
           - ansible_distribution == "Ubuntu"
           - ansible_distribution_version == "24.04"
           - node_ip is defined
-        fail_msg: "This playbook expects Ubuntu 24.04 and a node_ip per host."
-
-  tasks:
-    - name: Disable active swap
+          - kubernetes_role is defined
+    - name: Disable all active swap
       ansible.builtin.command: swapoff -a
       when: ansible_swaptotal_mb | int > 0
 
@@ -33,6 +31,7 @@
         path: /etc/fstab
         regexp: '^([^#].*\s+swap\s+.*)$'
         replace: '# \1'
+        backup: true
 
     - name: Configure required kernel modules
       ansible.builtin.copy:
@@ -44,14 +43,14 @@
         group: root
         mode: "0644"
 
-    - name: Load required kernel modules
+    - name: Load kernel modules
       ansible.builtin.command: "modprobe {{ item }}"
       loop:
         - overlay
         - br_netfilter
       changed_when: false
 
-    - name: Configure Kubernetes networking sysctl values
+    - name: Configure Kubernetes network sysctls
       ansible.builtin.copy:
         dest: /etc/sysctl.d/99-kubernetes-cri.conf
         content: |
@@ -62,36 +61,16 @@
         group: root
         mode: "0644"
 
-    - name: Apply networking sysctl values
-      ansible.builtin.sysctl:
-        name: "{{ item }}"
-        value: "1"
-        state: present
-        sysctl_file: /etc/sysctl.d/99-kubernetes-cri.conf
-        reload: true
-      loop:
-        - net.bridge.bridge-nf-call-iptables
-        - net.bridge.bridge-nf-call-ip6tables
-        - net.ipv4.ip_forward
+    - name: Apply sysctl configuration
+      ansible.builtin.command: sysctl --system
+      changed_when: false
 
-    - name: Install containerd and Kubernetes repository prerequisites
-      ansible.builtin.apt:
-        name:
-          - containerd
-          - ca-certificates
-          - curl
-          - gpg
-        state: present
-        update_cache: true
-        cache_valid_time: 3600
-    - name: Ensure containerd configuration directory exists
-      ansible.builtin.file:
-        path: /etc/containerd
-        state: directory
-        owner: root
-        group: root
-        mode: "0755"
-    - name: Generate default containerd configuration
+  roles:
+    - geerlingguy.swap
+    - geerlingguy.containerd
+
+  tasks:
+    - name: Generate containerd config only if absent
       ansible.builtin.shell: containerd config default > /etc/containerd/config.toml
       args:
         creates: /etc/containerd/config.toml
@@ -99,84 +78,9 @@
     - name: Configure containerd to use systemd cgroups
       ansible.builtin.lineinfile:
         path: /etc/containerd/config.toml
-        regexp: '^\s*#?\s*SystemdCgroup\s*='
-        line: '            SystemdCgroup = true'
+        regexp: '^\s*SystemdCgroup\s*='
+        line: "            SystemdCgroup = true"
       notify: Restart containerd
-
-    - name: Ensure containerd is enabled and running
-      ansible.builtin.systemd:
-        name: containerd
-        enabled: true
-        state: started
-
-    - name: Create Kubernetes apt key directory
-      ansible.builtin.file:
-        path: /etc/apt/keyrings
-        state: directory
-        owner: root
-        group: root
-        mode: "0755"
-
-    - name: Download Kubernetes repository signing key
-      ansible.builtin.get_url:
-        url: "{{ kubernetes_apt_key_url }}"
-        dest: /tmp/kubernetes-release.key
-        owner: root
-        group: root
-        mode: "0644"
-
-    - name: Install Kubernetes repository signing key
-      ansible.builtin.command:
-        argv:
-          - gpg
-          - --dearmor
-          - --yes
-          - --output
-          - /etc/apt/keyrings/kubernetes-apt-keyring.gpg
-          - /tmp/kubernetes-release.key
-      args:
-        creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
-
-    - name: Configure Kubernetes apt repository
-      ansible.builtin.copy:
-        dest: /etc/apt/sources.list.d/kubernetes.list
-        content: "{{ kubernetes_apt_repo }}\n"
-        owner: root
-        group: root
-        mode: "0644"
-
-    - name: Install kubelet kubeadm and kubectl
-      ansible.builtin.apt:
-        name:
-          - kubelet
-          - kubeadm
-          - kubectl
-        state: present
-        update_cache: true
-
-    - name: Hold Kubernetes package versions
-      ansible.builtin.dpkg_selections:
-        name: "{{ item }}"
-        selection: hold
-      loop:
-        - kubelet
-        - kubeadm
-        - kubectl
-
-    - name: Configure kubelet to use the internal node IP
-      ansible.builtin.lineinfile:
-        path: /etc/default/kubelet
-        regexp: '^KUBELET_EXTRA_ARGS='
-        line: "KUBELET_EXTRA_ARGS=--node-ip={{ node_ip }}"
-        create: true
-        owner: root
-        group: root
-        mode: "0644"
-
-    - name: Enable kubelet
-      ansible.builtin.systemd:
-        name: kubelet
-        enabled: true
 
   handlers:
     - name: Restart containerd
@@ -185,155 +89,58 @@
         state: restarted
 
 
-- name: Initialize Kubernetes control plane
+- name: Prepare the pinned Flannel manifest
   hosts: k8s_master
   become: true
-  gather_facts: true
+  gather_facts: false
   vars_files:
     - ../vars/cloud.yml
 
   tasks:
-    - name: Check whether the control plane already exists
-      ansible.builtin.stat:
-        path: /etc/kubernetes/admin.conf
-      register: admin_config
-
-    - name: Initialize Kubernetes control plane
-      ansible.builtin.command: >
-        kubeadm init
-        --apiserver-advertise-address={{ kubernetes_control_plane_ip }}
-        --pod-network-cidr={{ kubernetes_pod_network_cidr }}
-        --cri-socket={{ kubernetes_cri_socket }}
-      args:
-        creates: /etc/kubernetes/admin.conf
-      when: not admin_config.stat.exists
-
-    - name: Create kubeconfig directory for azureuser
-      ansible.builtin.file:
-        path: /home/azureuser/.kube
-        state: directory
-        owner: azureuser
-        group: azureuser
-        mode: "0700"
-
-    - name: Copy admin kubeconfig for azureuser
-      ansible.builtin.copy:
-        src: /etc/kubernetes/admin.conf
-        dest: /home/azureuser/.kube/config
-        remote_src: true
-        owner: azureuser
-        group: azureuser
-        mode: "0600"
-
-    - name: Download the pinned Flannel manifest
+    - name: Download Flannel manifest
       ansible.builtin.get_url:
         url: "{{ flannel_manifest_url }}"
-        dest: /tmp/kube-flannel.yml
+        dest: "{{ kubernetes_flannel_manifest_file }}"
         owner: root
         group: root
         mode: "0644"
 
-    - name: Configure Flannel to use the internal interface
+    - name: Configure Flannel to use the private interface
       ansible.builtin.lineinfile:
-        path: /tmp/kube-flannel.yml
+        path: "{{ kubernetes_flannel_manifest_file }}"
         regexp: '^\s*-\s+--iface='
         insertafter: '^\s*-\s+--kube-subnet-mgr$'
         line: "        - --iface={{ flannel_interface }}"
 
-    - name: Apply Flannel CNI manifest
-      ansible.builtin.command:
-        argv:
-          - kubectl
-          - --kubeconfig=/etc/kubernetes/admin.conf
-          - apply
-          - -f
-          - /tmp/kube-flannel.yml
-      register: flannel_apply
-      changed_when: >
-        'created' in flannel_apply.stdout or
-        'configured' in flannel_apply.stdout
 
-    - name: Check whether the worker has joined
-      ansible.builtin.command:
-        argv:
-          - kubectl
-          - --kubeconfig=/etc/kubernetes/admin.conf
-          - get
-          - node
-          - "{{ hostvars[groups['k8s_nodes'][0]]['ansible_hostname'] }}"
-      register: worker_node_check
-      changed_when: false
-      failed_when: false
-
-    - name: Create a join command when the worker is not registered
-      ansible.builtin.command: kubeadm token create --print-join-command
-      register: join_command
-      changed_when: false
-      when: worker_node_check.rc != 0
-      no_log: true
-
-    - name: Save the worker join command for the next play
-      ansible.builtin.set_fact:
-        kubeadm_join_command: >-
-          {{ join_command.stdout }}
-          --cri-socket={{ kubernetes_cri_socket }}
-      when: worker_node_check.rc != 0
-      no_log: true
-
-    - name: Download the Helm archive
-      ansible.builtin.get_url:
-        url: "https://get.helm.sh/helm-{{ helm_version }}-linux-amd64.tar.gz"
-        dest: "/tmp/helm-{{ helm_version }}-linux-amd64.tar.gz"
-        mode: "0644"
-
-    - name: Extract Helm
-      ansible.builtin.unarchive:
-        src: "/tmp/helm-{{ helm_version }}-linux-amd64.tar.gz"
-        dest: "/tmp"
-        remote_src: true
-        creates: "/tmp/linux-amd64/helm"
-
-    - name: Install Helm binary
-      ansible.builtin.copy:
-        src: /tmp/linux-amd64/helm
-        dest: /usr/local/bin/helm
-        remote_src: true
-        owner: root
-        group: root
-        mode: "0755"
-
-
-- name: Join the worker to Kubernetes
-  hosts: k8s_nodes
+- name: Configure Kubernetes using the role
+  hosts: k8s
   become: true
   gather_facts: true
   vars_files:
     - ../vars/cloud.yml
 
-  tasks:
-    - name: Check whether this worker already joined
-      ansible.builtin.stat:
-        path: /etc/kubernetes/kubelet.conf
-      register: worker_kubelet_config
-
-    - name: Join the worker to the control plane
-      ansible.builtin.command: >-
-        {{ hostvars[groups['k8s_master'][0]]['kubeadm_join_command'] }}
-      when:
-        - not worker_kubelet_config.stat.exists
-        - hostvars[groups['k8s_master'][0]]['kubeadm_join_command'] is defined
-      no_log: true
+  roles:
+    - geerlingguy.kubernetes
 
 
-- name: Verify cluster readiness
+- name: Install Helm on the control plane
   hosts: k8s_master
   become: true
   gather_facts: true
   vars_files:
     - ../vars/cloud.yml
 
+  roles:
+    - geerlingguy.helm
+
+- name: Verify cluster readiness
+  hosts: k8s_master
+  become: true
+  gather_facts: false
+
   tasks:
-    - name: Wait for Kubernetes nodes to become Ready
+    - name: Wait for all Kubernetes nodes to become Ready
       ansible.builtin.command:
         argv:
           - kubectl
@@ -345,7 +152,33 @@
           - --timeout=300s
       changed_when: false
 
-    - name: Display cluster node status
+    - name: Wait for all kube-system pods to become Ready
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig=/etc/kubernetes/admin.conf
+          - --namespace=kube-system
+          - wait
+          - --for=condition=Ready
+          - pods
+          - --all
+          - --timeout=300s
+      changed_when: false
+
+    - name: Wait for all Flannel pods to become Ready
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig=/etc/kubernetes/admin.conf
+          - --namespace=kube-flannel
+          - wait
+          - --for=condition=Ready
+          - pods
+          - --all
+          - --timeout=300s
+      changed_when: false
+
+    - name: Get Kubernetes node status
       ansible.builtin.command:
         argv:
           - kubectl
@@ -357,15 +190,15 @@
       register: cluster_nodes
       changed_when: false
 
-    - name: Show cluster nodes
+    - name: Display Kubernetes node status
       ansible.builtin.debug:
         var: cluster_nodes.stdout_lines
 
-    - name: Display Helm version
+    - name: Get Helm version
       ansible.builtin.command: helm version --short
       register: helm_output
       changed_when: false
 
-    - name: Show Helm version
+    - name: Display Helm version
       ansible.builtin.debug:
         var: helm_output.stdout

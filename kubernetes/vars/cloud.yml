@@ -1,18 +1,33 @@
 ---
-# Kubernetes configuration for the shared cloud servers.
-# Keep existing Vagrant variables unchanged.
+# Swap
+swap_file_state: absent
 
-kubernetes_minor_version: "v1.37"
-kubernetes_pod_network_cidr: "10.244.0.0/16"
+# Preserve the existing Ubuntu containerd package and configuration.
+containerd_package: containerd
+containerd_package_state: present
+containerd_service_state: started
+containerd_service_enabled: true
+containerd_config_default_write: false
 
-kubernetes_control_plane_ip: "172.16.0.4"
-kubernetes_cri_socket: "unix:///run/containerd/containerd.sock"
+# Kubernetes version currently running on the servers.
+kubernetes_version: "1.37"
+kubernetes_apiserver_advertise_address: "172.16.0.4"
 
-kubernetes_apt_key_url: "https://pkgs.k8s.io/core:/stable:/v1.37/deb/Release.key"
-kubernetes_apt_repo: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.37/deb/ /"
+kubernetes_pod_network:
+  cni: flannel
+  cidr: "10.244.0.0/16"
 
+kubernetes_config_kubelet_configuration:
+  cgroupDriver: systemd
+
+kubernetes_kubelet_extra_args: "--node-ip={{ node_ip }}"
+kubernetes_allow_pods_on_control_plane: true
+kubernetes_ignore_preflight_errors: "Swap"
+
+# Pin the Flannel version and use the cloud's private interface.
+kubernetes_flannel_manifest_file: "/tmp/kube-flannel.yml"
 flannel_manifest_url: "https://github.com/flannel-io/flannel/releases/download/v0.28.9/kube-flannel.yml"
 flannel_interface: "eth0"
 
-# The assignment specifically uses Helm 3.
+# Keep the Helm version already installed on the Master.
 helm_version: "v3.22.0"
