@@ -1,0 +1,44 @@
+---
+- name: Deploy the Online Boutique to Kubernetes
+  hosts: k8s_master
+  become: true
+  gather_facts: false
+  vars_files:
+    - ../vars/microservices.yml
+
+  pre_tasks:
+    - name: Confirm Helm is installed
+      ansible.builtin.command: helm version --short
+      register: helm_check
+      changed_when: false
+
+    - name: Install the Kubernetes Python client and git
+      ansible.builtin.apt:
+        name:
+          - python3-kubernetes
+          - git
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+  tasks:
+    - name: Clone the upstream Helm charts
+      ansible.builtin.git:
+        repo: "{{ repo_url }}"
+        dest: "{{ src }}"
+        version: "{{ repo_version }}"
+        force: true
+
+    - name: Deploy each release with Helm
+      kubernetes.core.helm:
+        kubeconfig: /etc/kubernetes/admin.conf
+        name: "{{ item.name }}"
+        chart_ref: "{{ src }}/{{ item.chart }}"
+        release_namespace: "{{ app_namespace }}"
+        create_namespace: true
+        values_files:
+          - "{{ src }}/{{ item.values_file }}"
+        values: "{{ common | combine(item.overrides | default({})) }}" #overrides value
+      loop: "{{ microservices }}"
+      loop_control:
+        label: "{{ item.name }}"
