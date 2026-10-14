@@ -1,0 +1,58 @@
+repo_url: "https://github.com/iankisali/microservice-deployment.git"
+repo_version: "main"
+src: "/tmp/microservice-deployment"
+
+app_namespace: "microservice"
+
+
+common:
+  appReplicas: 1
+
+microservices:
+  - name: redis-cart
+    chart: "chart/redis"
+    values_file: "values/redis-values.yaml"
+
+  - name: emailservice
+    chart: "chart/microservice"
+    values_file: "values/email-service-values.yaml"
+
+  - name: cartservice
+    chart: "chart/microservice"
+    values_file: "values/cart-service-values.yaml"
+
+  - name: currencyservice
+    chart: "chart/microservice"
+    values_file: "values/currency-service-values.yaml"
+
+  - name: paymentservice
+    chart: "chart/microservice"
+    values_file: "values/payment-service-values.yaml"
+
+  - name: recommendationservice
+    chart: "chart/microservice"
+    values_file: "values/recommendation-service-values.yaml"
+
+  - name: productcatalogservice
+    chart: "chart/microservice"
+    values_file: "values/productcatalog-service-values.yaml"
+
+  - name: shippingservice
+    chart: "chart/microservice"
+    values_file: "values/shipping-service-values.yaml"
+
+  - name: adservice
+    chart: "chart/microservice"
+    values_file: "values/ad-service-values.yaml"
+
+  - name: checkoutservice
+    chart: "chart/microservice"
+    values_file: "values/checkout-service-values.yaml"
+    overrides:
+      appName: checkoutservice
+
+  - name: frontend
+    chart: "chart/microservice"
+    values_file: "values/frontend-values.yaml"
+    overrides:
+      serviceType: NodePort

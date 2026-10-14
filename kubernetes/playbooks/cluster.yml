@@ -1,4 +1,6 @@
 ---
+# Tắt cảnh báo của VSCode (không liên quan đến code)
+# yaml-language-server: $schema=https://raw.githubusercontent.com/ansible/ansible-lint/main/src/ansiblelint/schemas/ansible.json#/$defs/playbook
 - name: Prepare cloud nodes and container runtime
   hosts: k8s
   become: true
