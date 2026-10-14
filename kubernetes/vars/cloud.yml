@@ -1,0 +1,33 @@
+---
+# Swap
+swap_file_state: absent
+
+# Preserve the existing Ubuntu containerd package and configuration.
+containerd_package: containerd
+containerd_package_state: present
+containerd_service_state: started
+containerd_service_enabled: true
+containerd_config_default_write: false
+
+# Kubernetes version currently running on the servers.
+kubernetes_version: "1.37"
+kubernetes_apiserver_advertise_address: "172.16.0.4"
+
+kubernetes_pod_network:
+  cni: flannel
+  cidr: "10.244.0.0/16"
+
+kubernetes_config_kubelet_configuration:
+  cgroupDriver: systemd
+
+kubernetes_kubelet_extra_args: "--node-ip={{ node_ip }}"
+kubernetes_allow_pods_on_control_plane: true
+kubernetes_ignore_preflight_errors: "Swap"
+
+# Pin the Flannel version and use the cloud's private interface.
+kubernetes_flannel_manifest_file: "/tmp/kube-flannel.yml"
+flannel_manifest_url: "https://github.com/flannel-io/flannel/releases/download/v0.28.9/kube-flannel.yml"
+flannel_interface: "eth0"
+
+# Keep the Helm version already installed on the Master.
+helm_version: "v3.22.0"

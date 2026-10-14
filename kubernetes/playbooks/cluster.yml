@@ -1,0 +1,204 @@
+---
+- name: Prepare cloud nodes and container runtime
+  hosts: k8s
+  become: true
+  gather_facts: true
+  vars_files:
+    - ../vars/cloud.yml
+
+  pre_tasks:
+    - name: Require approval before changing shared servers
+      ansible.builtin.assert:
+        that:
+          - confirm_shared_server_changes | default(false) | bool
+        fail_msg: >-
+          Review changes with the group leader before running this playbook
+          against shared servers.
+
+    - name: Verify cloud host configuration
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == "Ubuntu"
+          - ansible_distribution_version == "24.04"
+          - node_ip is defined
+          - kubernetes_role is defined
+    - name: Disable all active swap
+      ansible.builtin.command: swapoff -a
+      when: ansible_swaptotal_mb | int > 0
+
+    - name: Disable swap entries in fstab
+      ansible.builtin.replace:
+        path: /etc/fstab
+        regexp: '^([^#].*\s+swap\s+.*)$'
+        replace: '# \1'
+        backup: true
+
+    - name: Configure required kernel modules
+      ansible.builtin.copy:
+        dest: /etc/modules-load.d/k8s.conf
+        content: |
+          overlay
+          br_netfilter
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Load kernel modules
+      ansible.builtin.command: "modprobe {{ item }}"
+      loop:
+        - overlay
+        - br_netfilter
+      changed_when: false
+
+    - name: Configure Kubernetes network sysctls
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-kubernetes-cri.conf
+        content: |
+          net.bridge.bridge-nf-call-iptables = 1
+          net.bridge.bridge-nf-call-ip6tables = 1
+          net.ipv4.ip_forward = 1
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Apply sysctl configuration
+      ansible.builtin.command: sysctl --system
+      changed_when: false
+
+  roles:
+    - geerlingguy.swap
+    - geerlingguy.containerd
+
+  tasks:
+    - name: Generate containerd config only if absent
+      ansible.builtin.shell: containerd config default > /etc/containerd/config.toml
+      args:
+        creates: /etc/containerd/config.toml
+
+    - name: Configure containerd to use systemd cgroups
+      ansible.builtin.lineinfile:
+        path: /etc/containerd/config.toml
+        regexp: '^\s*SystemdCgroup\s*='
+        line: "            SystemdCgroup = true"
+      notify: Restart containerd
+
+  handlers:
+    - name: Restart containerd
+      ansible.builtin.systemd:
+        name: containerd
+        state: restarted
+
+
+- name: Prepare the pinned Flannel manifest
+  hosts: k8s_master
+  become: true
+  gather_facts: false
+  vars_files:
+    - ../vars/cloud.yml
+
+  tasks:
+    - name: Download Flannel manifest
+      ansible.builtin.get_url:
+        url: "{{ flannel_manifest_url }}"
+        dest: "{{ kubernetes_flannel_manifest_file }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Configure Flannel to use the private interface
+      ansible.builtin.lineinfile:
+        path: "{{ kubernetes_flannel_manifest_file }}"
+        regexp: '^\s*-\s+--iface='
+        insertafter: '^\s*-\s+--kube-subnet-mgr$'
+        line: "        - --iface={{ flannel_interface }}"
+
+
+- name: Configure Kubernetes using the role
+  hosts: k8s
+  become: true
+  gather_facts: true
+  vars_files:
+    - ../vars/cloud.yml
+
+  roles:
+    - geerlingguy.kubernetes
+
+
+- name: Install Helm on the control plane
+  hosts: k8s_master
+  become: true
+  gather_facts: true
+  vars_files:
+    - ../vars/cloud.yml
+
+  roles:
+    - geerlingguy.helm
+
+- name: Verify cluster readiness
+  hosts: k8s_master
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Wait for all Kubernetes nodes to become Ready
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig=/etc/kubernetes/admin.conf
+          - wait
+          - --for=condition=Ready
+          - nodes
+          - --all
+          - --timeout=300s
+      changed_when: false
+
+    - name: Wait for all kube-system pods to become Ready
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig=/etc/kubernetes/admin.conf
+          - --namespace=kube-system
+          - wait
+          - --for=condition=Ready
+          - pods
+          - --all
+          - --timeout=300s
+      changed_when: false
+
+    - name: Wait for all Flannel pods to become Ready
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig=/etc/kubernetes/admin.conf
+          - --namespace=kube-flannel
+          - wait
+          - --for=condition=Ready
+          - pods
+          - --all
+          - --timeout=300s
+      changed_when: false
+
+    - name: Get Kubernetes node status
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig=/etc/kubernetes/admin.conf
+          - get
+          - nodes
+          - -o
+          - wide
+      register: cluster_nodes
+      changed_when: false
+
+    - name: Display Kubernetes node status
+      ansible.builtin.debug:
+        var: cluster_nodes.stdout_lines
+
+    - name: Get Helm version
+      ansible.builtin.command: helm version --short
+      register: helm_output
+      changed_when: false
+
+    - name: Display Helm version
+      ansible.builtin.debug:
+        var: helm_output.stdout

@@ -2,7 +2,9 @@
 roles:
   - name: geerlingguy.swap
   - name: geerlingguy.docker
+  - name: geerlingguy.containerd
   - name: geerlingguy.kubernetes
+  - name: geerlingguy.helm
 
 collections:
   - name: community.kubernetes
