@@ -1,0 +1,33 @@
+---
+- name: Teardown the Online Boutique application
+  hosts: k8s_master
+  become: true
+  gather_facts: false
+  vars_files:
+    - ../vars/microservices.yml
+  vars:
+    kubeconfig: /etc/kubernetes/admin.conf
+
+  tasks:
+    - name: Uninstall all Helm releases in the application namespace
+      kubernetes.core.helm:
+        kubeconfig: "{{ kubeconfig }}"
+        name: "{{ item.name }}"
+        release_namespace: "{{ app_namespace }}"
+        state: absent
+        wait: true
+      loop: "{{ microservices }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Remove the application namespace
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: v1
+        kind: Namespace
+        name: "{{ app_namespace }}"
+        state: absent
+
+    - name: Confirm application teardown
+      ansible.builtin.debug:
+        msg: "Online Boutique application has been cleanly uninstalled. Cluster remains active."
