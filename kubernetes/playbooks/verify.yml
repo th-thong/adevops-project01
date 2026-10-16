@@ -1,0 +1,177 @@
+---
+- name: Verify the Kubernetes cluster and Online Boutique
+  hosts: k8s_master
+  become: true
+  gather_facts: false
+  vars_files:
+    - ../vars/microservices.yml
+  vars:
+    kubeconfig: /etc/kubernetes/admin.conf
+
+  tasks:
+    - name: Read Kubernetes nodes
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - "--kubeconfig={{ kubeconfig }}"
+          - get
+          - nodes
+          - -o
+          - json
+      register: node_result
+      changed_when: false
+
+    - name: Parse Kubernetes node information
+      ansible.builtin.set_fact:
+        cluster_nodes: "{{ node_result.stdout | from_json }}"
+        cluster_internal_ips: >-
+          {{ (node_result.stdout | from_json)['items']
+             | map(attribute='status.addresses')
+             | flatten
+             | selectattr('type', 'equalto', 'InternalIP')
+             | map(attribute='address')
+             | list }}
+
+    - name: Assert Kubernetes registered every inventory node
+      ansible.builtin.assert:
+        that:
+          - cluster_nodes['items'] | length == groups['k8s'] | length
+        fail_msg: >-
+          Kubernetes has {{ cluster_nodes['items'] | length }} nodes registered,
+          but the inventory defines {{ groups['k8s'] | length }} nodes.
+
+    - name: Assert every inventory node is registered on its private IP
+      ansible.builtin.assert:
+        that:
+          - (hostvars[item].node_ip | default(hostvars[item].ansible_host)) in cluster_internal_ips
+        fail_msg: >-
+          Inventory host {{ item }} ({{ hostvars[item].ansible_host }}) is not
+          registered as a Kubernetes InternalIP.
+        quiet: true
+      loop: "{{ groups['k8s'] }}"
+
+    - name: Assert every Kubernetes node is Ready
+      ansible.builtin.assert:
+        that:
+          - >-
+            item.status.conditions
+            | selectattr('type', 'equalto', 'Ready')
+            | selectattr('status', 'equalto', 'True')
+            | list
+            | length == 1
+        fail_msg: "Kubernetes node {{ item.metadata.name }} is not Ready."
+        quiet: true
+      loop: "{{ cluster_nodes['items'] }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+
+    - name: Assert the project defines eleven application deployments
+      ansible.builtin.assert:
+        that:
+          - microservices | length == 11
+          - (microservices | map(attribute='name') | unique | list | length) == 11
+        fail_msg: "The application configuration must define eleven unique deployments."
+
+    - name: Read every application deployment
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - "--kubeconfig={{ kubeconfig }}"
+          - --namespace
+          - "{{ app_namespace }}"
+          - get
+          - deployment
+          - "{{ item.name }}"
+          - -o
+          - json
+      loop: "{{ microservices }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: deployment_results
+      changed_when: false
+
+    - name: Assert every deployment has all requested replicas available
+      ansible.builtin.assert:
+        that:
+          - (item.stdout | from_json).spec.replicas | int > 0
+          - >-
+            (item.stdout | from_json).status.availableReplicas
+            | default(0) | int
+            ==
+            (item.stdout | from_json).spec.replicas | int
+        fail_msg: >-
+          Deployment {{ item.item.name }} does not have all of its requested
+          replicas available.
+        quiet: true
+      loop: "{{ deployment_results.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+    - name: Read the checkoutservice Service
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - "--kubeconfig={{ kubeconfig }}"
+          - --namespace
+          - "{{ app_namespace }}"
+          - get
+          - service
+          - checkoutservice
+          - -o
+          - json
+      register: checkout_service_result
+      changed_when: false
+
+    - name: Assert the checkout Service has the expected name
+      ansible.builtin.assert:
+        that:
+          - (checkout_service_result.stdout | from_json).metadata.name == "checkoutservice"
+        fail_msg: "The application Service must be named checkoutservice."
+
+    - name: Read the frontend Service
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - "--kubeconfig={{ kubeconfig }}"
+          - --namespace
+          - "{{ app_namespace }}"
+          - get
+          - service
+          - frontend
+          - -o
+          - json
+      register: frontend_service_result
+      changed_when: false
+
+    - name: Assert frontend is exposed as a NodePort
+      ansible.builtin.assert:
+        that:
+          - (frontend_service_result.stdout | from_json).spec.type == "NodePort"
+          - (frontend_service_result.stdout | from_json).spec.ports[0].nodePort is defined
+        fail_msg: "The frontend Service must expose a NodePort."
+
+    - name: Set the storefront URL
+      ansible.builtin.set_fact:
+        storefront_url: >-
+          http://{{ hostvars[groups['k8s'][0]].ansible_host }}:{{
+          (frontend_service_result.stdout | from_json).spec.ports[0].nodePort }}/
+
+    - name: Request the storefront
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ (frontend_service_result.stdout | from_json).spec.ports[0].nodePort }}/"
+        method: GET
+        return_content: true
+        status_code: 200
+      register: storefront_response
+
+    - name: Assert the response contains the Online Boutique storefront
+      ansible.builtin.assert:
+        that:
+          - storefront_response.content is search('(?i)online boutique')
+        fail_msg: >-
+          The storefront returned HTTP 200 but did not contain recognizable
+          Online Boutique content.
+
+    - name: Display the verified storefront URL
+      ansible.builtin.debug:
+        msg: "Online Boutique is available at {{ storefront_url }}"
