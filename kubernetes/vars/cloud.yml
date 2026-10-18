@@ -11,7 +11,7 @@ containerd_config_default_write: false
 
 # Kubernetes version currently running on the servers.
 kubernetes_version: "1.37"
-kubernetes_apiserver_advertise_address: "172.16.0.4"
+kubernetes_apiserver_advertise_address: "{{ hostvars[groups['k8s_master'][0]]['node_ip'] }}"
 
 kubernetes_pod_network:
   cni: flannel
